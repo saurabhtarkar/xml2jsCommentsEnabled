@@ -1,0 +1,199 @@
+#!/usr/bin/env node
+// vim: set ft=javascript :
+
+var fs = require('fs')
+  , path = require('path')
+  , spawn = require('child_process').spawn
+  , util = require('util')
+
+var coffee
+try {
+	coffee = require('coffee-script/register')
+} catch (e0) {
+ 	try {
+		coffee = require('coffee-script')
+	} catch (e1) {}
+}
+
+if (process.argv[2] === '--one') {
+	// run a particular test
+	var test = {
+		done: function () {
+			test._finished++
+		},
+		finish: function () { this.done() },
+		_finished: 0,
+		fail: function (message) {
+			console.log("Test failed: ", message, "\n")
+			process.exit(1)
+		},
+	}
+	process.on('exit', function (code) {
+		if (suite && suite.teardown) {
+			suite.teardown.call(context, test)
+		}
+		if (code > 0) { return }
+		if (test._finished == 1) {
+			process.reallyExit(0)
+		} else {
+			if (test._finished == 0) {
+				console.log("Test didn't call done().")
+			} else {
+				console.log("Test called done()", test._finished, "times.")
+			}
+			process.reallyExit(1)
+		}
+	})
+	var suite = require(path.resolve(process.argv[3]))
+	var context = {}
+	if (suite.setup) {
+		suite.setup.call(context, test)
+	}
+	suite[process.argv[4]].call(context, test)
+} else {
+	// run a suite
+	var test_targets = []
+	if (process.argv.length <= 2) {
+		if (!fs.existsSync('./test')) {
+			console.error(
+				"Test directory (./test) not found. zap suggests:\n\n" +
+				"\x1b[36m$\x1b[0m mkdir ./test\n" +
+				"\x1b[36m$\x1b[0m cat > ./test/example.test.js\n" +
+				"var assert = require('assert')\n" +
+				"module.exports = {\n" +
+				"  'example test': function (test) {\n" +
+				"     assert.ok(true, 'test passed!');\n" +
+				"     test.finish()\n" +
+				"  },\n" +
+				"}\n" +
+				"\x1b[36m$\x1b[0m zap\n" +
+				"\x1b[33;1m\u26a1 \u26a1 \u26a1\x1b[0m")
+			process.exit(1)
+		}
+		if (!fs.statSync('./test').isDirectory()) {
+			console.error("zap: ./test is not a directory")
+			process.exit(1)
+		}
+		test_targets.push('./test')
+	} else {
+		for (var i = 2; i < process.argv.length; i++) {
+			test_targets.push(process.argv[i])
+		}
+	}
+	var test_files = []
+	test_targets.forEach(function (target) {
+		test_files = test_files.concat(allTestFiles(target))
+	})
+
+	function allTestFiles(pth, match) {
+		var stats = fs.statSync(pth)
+		if (stats.isFile()) {
+			if (!match || pth.match(match)) {
+				return [path.resolve(pth)]
+			} else {
+				return []
+			}
+		} else if (stats.isDirectory()) {
+			var paths = []
+			fs.readdirSync(pth).forEach(function (file) {
+				var rfile
+				if (coffee)
+					rfile = /\.test\.(js|coffee)$/
+				else
+					rfile = /\.test\.js$/
+				paths = paths.concat(allTestFiles(path.join(pth, file), rfile))
+			})
+			return paths
+		} else {
+			return []
+		}
+	}
+
+	var tests = []
+	test_files.forEach(function (tf) {
+		Object.keys(require(tf)).forEach(function (test) {
+			if (['setup','teardown'].indexOf(test) >= 0) { return }
+			tests.push({ file: tf, test: test })
+		})
+	})
+	if (tests.length === 0) {
+		console.info("All of 0 tests passed. Yeah!")
+		process.exit(0)
+	}
+
+	function name(t) {
+		return "\x1b[35m" + path.basename(t.file).match(/^(.+?)(\.test)?\.(js|coffee)$/)[1] + "\x1b[0m" + '/' + t.test
+	}
+
+	function runOne(t, cb) {
+		var output = ''
+		var runner = spawn(process.execPath, [__filename, '--one', t.file, t.test])
+		runner.on('exit', function (code) {
+			if (code == 0) {
+				cb()
+			} else {
+				cb(output)
+			}
+		})
+		runner.stdout.on('data', function (data) { output += data })
+		runner.stderr.on('data', function (data) { output += data })
+	}
+
+	var numFailures = 0
+	function runPar() {
+		var ordered = { upTo: 0 }
+		function inOrder(n, cb) {
+			if (!ordered[n]) { ordered[n] = [] }
+			if (ordered.upTo == n) {
+				cb()
+			} else {
+				ordered[n].push(cb)
+			}
+		}
+		function doneOrder(n) {
+			ordered[n].done = true
+			while (ordered[ordered.upTo] && ordered[ordered.upTo].done) {
+				ordered[ordered.upTo].forEach(function (cb) { cb() })
+				ordered.upTo++
+			}
+			if (ordered[ordered.upTo]) {
+				ordered[ordered.upTo].forEach(function (cb) { cb() })
+			}
+			ordered[ordered.upTo] = []
+		}
+		var testOrder = 0
+		function runNext() {
+			if (tests.length <= 0) { return }
+			var t = tests.shift()
+			var o = testOrder++
+			inOrder(o, function () {
+				process.stdout.write(
+					util.format("%s... ", name(t)))
+				})
+			runOne(t, function (err) {
+				if (err) {
+					numFailures++
+					inOrder(o, function () {
+						console.log("\x1b[1;31mfailed\x1b[0m")
+						console.log(err)
+					})
+				} else {
+					inOrder(o, function () {
+						console.log("passed")
+					})
+				}
+				doneOrder(o)
+				runNext()
+			})
+		}
+		var numCPUs = require('os').cpus().length
+		for (var i = 0; i < numCPUs + 1; i++) {
+			runNext()
+		}
+	}
+
+	process.on('exit', function() {
+		process.reallyExit(numFailures ? 1 : 0)
+	})
+	runPar()
+}
