@@ -1,5 +1,13 @@
-node-xml2js
+node-xml2js 
 ===========
+Addon to the below module is the parsing of the comments in the xml data.
+It is parsed in the json object :
+{
+    'tag' : 'tagName'
+    'comment': 'comment for the respective tag'
+}
+
+The above object is reflected in the parsed json object of the xml tag.
 
 Ever had the urge to parse XML? And wanted to access the data in some sane,
 easy way? Don't want to compile a C parser, for whatever reason? Then xml2js is
